@@ -1,0 +1,29 @@
+{
+  "request": {
+    "query": "query($representations:[_Any!]!){_entities(representations:$representations){...on Product{delivery(zip:\"94111\"){estimatedDelivery fastestDelivery}}}}",
+    "variables": {
+      "representations": [
+        {
+          "__typename": "Product",
+          "dimensions": {
+            "size": "small",
+            "weight": 1
+          },
+          "id": "apollo-federation"
+        }
+      ]
+    }
+  },
+  "response": {
+    "data": {
+      "_entities": [
+        {
+          "delivery": {
+            "estimatedDelivery": "5/1/2019",
+            "fastestDelivery": "5/1/2019"
+          }
+        }
+      ]
+    }
+  }
+}

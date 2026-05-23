@@ -1,0 +1,13 @@
+{
+  "request": {
+    "query": "{product(id:\"apollo-federation\"){id sku}}"
+  },
+  "response": {
+    "data": {
+      "product": {
+        "id": "apollo-federation",
+        "sku": "federation"
+      }
+    }
+  }
+}

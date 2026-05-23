@@ -1,0 +1,10 @@
+{
+  "data": {
+    "product": {
+      "createdBy": {
+        "email": "support@apollographql.com",
+        "name": "Jane Smith"
+      }
+    }
+  }
+}

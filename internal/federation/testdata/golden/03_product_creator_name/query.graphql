@@ -1,0 +1,1 @@
+{ product(id: "apollo-federation") { createdBy { email name } } }

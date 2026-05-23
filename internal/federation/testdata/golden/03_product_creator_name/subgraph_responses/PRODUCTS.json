@@ -1,0 +1,15 @@
+{
+  "request": {
+    "query": "{product(id:\"apollo-federation\"){createdBy{email name}}}"
+  },
+  "response": {
+    "data": {
+      "product": {
+        "createdBy": {
+          "email": "support@apollographql.com",
+          "name": "Jane Smith"
+        }
+      }
+    }
+  }
+}

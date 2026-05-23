@@ -1,0 +1,24 @@
+{
+  "request": {
+    "query": "query($representations:[_Any!]!){_entities(representations:$representations){...on User{averageProductsCreatedPerYear}}}",
+    "variables": {
+      "representations": [
+        {
+          "__typename": "User",
+          "email": "support@apollographql.com",
+          "totalProductsCreated": 1337,
+          "yearsOfEmployment": 10
+        }
+      ]
+    }
+  },
+  "response": {
+    "data": {
+      "_entities": [
+        {
+          "averageProductsCreatedPerYear": 134
+        }
+      ]
+    }
+  }
+}

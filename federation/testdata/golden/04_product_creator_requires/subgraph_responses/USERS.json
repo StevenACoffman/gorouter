@@ -1,0 +1,22 @@
+{
+  "request": {
+    "query": "query($representations:[_Any!]!){_entities(representations:$representations){...on User{yearsOfEmployment}}}",
+    "variables": {
+      "representations": [
+        {
+          "__typename": "User",
+          "email": "support@apollographql.com"
+        }
+      ]
+    }
+  },
+  "response": {
+    "data": {
+      "_entities": [
+        {
+          "yearsOfEmployment": 10
+        }
+      ]
+    }
+  }
+}

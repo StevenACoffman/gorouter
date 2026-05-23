@@ -1,0 +1,17 @@
+{
+  "request": {
+    "query": "{product(id:\"apollo-federation\"){__typename id dimensions{size weight}}}"
+  },
+  "response": {
+    "data": {
+      "product": {
+        "__typename": "Product",
+        "dimensions": {
+          "size": "small",
+          "weight": 1
+        },
+        "id": "apollo-federation"
+      }
+    }
+  }
+}

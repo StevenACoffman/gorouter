@@ -1,0 +1,15 @@
+{
+  "request": {
+    "query": "{product(id:\"apollo-federation\"){createdBy{email totalProductsCreated}}}"
+  },
+  "response": {
+    "data": {
+      "product": {
+        "createdBy": {
+          "email": "support@apollographql.com",
+          "totalProductsCreated": 1337
+        }
+      }
+    }
+  }
+}

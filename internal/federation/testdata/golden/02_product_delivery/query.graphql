@@ -1,0 +1,1 @@
+{ product(id: "apollo-federation") { id delivery(zip: "94111") { estimatedDelivery fastestDelivery } } }
