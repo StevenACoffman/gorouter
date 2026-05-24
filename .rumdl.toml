@@ -15,7 +15,7 @@ flavor = "gfm" # GitHub Flavored Markdown with security-sensitive HTML warnings 
 
 # Additional rules to enable on top of defaults (additive, does not replace)
 # Use this to activate opt-in rules like MD060, MD063, MD072, MD073, MD074
-extend-enable = ["MD060", "MD063"]
+extend-enable = ["MD060", "MD063", "MD073"]
 
 # Additional rules to disable on top of the disable list (additive)
 # extend-disable = ["MD041"]
@@ -54,8 +54,8 @@ respect-gitignore = true
 [MD003]
 style = "atx"  # mdformat always converts setext headings to ATX
 
-# [MD004]
-# style = "asterisk"  # Unordered list style (asterisk, plus, dash, consistent)
+[MD004]
+style = "dash"  # mdformat normalizes all unordered list markers (* + -) to -
 
 [MD029]
 style = "ordered"  # matches mdformat --number (sequential numbering)
@@ -81,6 +81,9 @@ style = "backtick"  # mdformat defaults to backtick fences (tildes only as fallb
 # [MD044]
 # names = ["rumdl", "Markdown", "GitHub"]  # Proper names that should be capitalized correctly
 # code-blocks = false  # Check code blocks for proper names (default: false, skips code blocks)
+
+[MD010]
+code-blocks = false  # Go code in fenced blocks uses tab indentation; gofmt keeps them
 
 [MD060]
 enabled = true              # Default: opt-in for conservative adoption

@@ -302,3 +302,8 @@ __pycache__/
 dist/
 *.egg-info/
 *,out
+# Claude Code — generated skill symlinks (source lives in .agents/skills/)
+.claude/skills/
+
+# Rumdl - markdown linter cache
+.rumdl_cache

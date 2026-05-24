@@ -124,6 +124,34 @@ func (sg *Supergraph) FieldProvides(typeName, fieldName string) string {
 // ParseSchema parses a Federation v2 supergraph SDL and returns a routing table.
 // It extracts subgraph URLs from the join__Graph enum and field ownership
 // from @join__type / @join__field directives.
+// SubgraphURLs parses sdl and returns a map of join__Graph enum name → service URL.
+// It is the minimal SDL parse a federation client needs at startup: just the routing table.
+// Use the returned map as the subgraphURLs argument to generated NewClient constructors.
+func SubgraphURLs(sdl string) (map[string]string, error) {
+	doc, err := parser.ParseSchema(&ast.Source{Input: sdl, Name: "supergraph"})
+	if err != nil {
+		return nil, fmt.Errorf("federation: parse schema: %w", err)
+	}
+	return extractSubgraphURLs(doc), nil
+}
+
+// extractSubgraphURLs is the pure core of both SubgraphURLs and ParseSchema Pass 1.
+func extractSubgraphURLs(doc *ast.SchemaDocument) map[string]string {
+	urls := make(map[string]string)
+	for _, def := range doc.Definitions {
+		if def.Kind == ast.Enum && def.Name == "join__Graph" {
+			for _, ev := range def.EnumValues {
+				for _, d := range ev.Directives {
+					if d.Name == "join__graph" {
+						urls[ev.Name] = directiveArg(d, "url")
+					}
+				}
+			}
+		}
+	}
+	return urls
+}
+
 func ParseSchema(sdl string) (*Supergraph, error) {
 	doc, err := parser.ParseSchema(&ast.Source{Input: sdl, Name: "supergraph"})
 	if err != nil {
@@ -136,7 +164,7 @@ func ParseSchema(sdl string) (*Supergraph, error) {
 		fieldMetas: make(map[string]map[string]fieldMeta),
 	}
 
-	// Pass 1: extract subgraph URLs from the join__Graph enum.
+	// Pass 1: extract subgraph URLs and names from the join__Graph enum.
 	for _, def := range doc.Definitions {
 		if def.Kind == ast.Enum && def.Name == "join__Graph" {
 			for _, ev := range def.EnumValues {

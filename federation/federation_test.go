@@ -481,3 +481,26 @@ func TestBuildEntityQuery(t *testing.T) {
 
 	_ = ef // suppress unused variable warning
 }
+
+func TestSubgraphURLs(t *testing.T) {
+	urls, err := federation.SubgraphURLs(minimalSDL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if urls["ACCOUNTS"] != "ACCOUNTS_URL" {
+		t.Errorf("ACCOUNTS url = %q, want ACCOUNTS_URL", urls["ACCOUNTS"])
+	}
+	if urls["REVIEWS"] != "REVIEWS_URL" {
+		t.Errorf("REVIEWS url = %q, want REVIEWS_URL", urls["REVIEWS"])
+	}
+	if len(urls) != 2 {
+		t.Errorf("expected 2 entries, got %d: %v", len(urls), urls)
+	}
+}
+
+func TestSubgraphURLs_InvalidSDL(t *testing.T) {
+	_, err := federation.SubgraphURLs("not valid graphql {{{{")
+	if err == nil {
+		t.Error("expected error for invalid SDL")
+	}
+}
