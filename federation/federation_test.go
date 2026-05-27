@@ -212,6 +212,125 @@ func TestBuildPlan_CrossSubgraphEntityFetch(t *testing.T) {
 	if ef.ParentPath[0] != "me" {
 		t.Errorf("entity fetch parent path = %v, want [me]", ef.ParentPath)
 	}
+	if ef.Query == "" {
+		t.Error("entity fetch Query should be non-empty (built at plan time)")
+	}
+	if !strings.Contains(ef.Query, "_entities") {
+		t.Errorf("entity fetch Query should contain _entities: %q", ef.Query)
+	}
+}
+
+// varArgSDL extends the minimal schema with a cross-subgraph field that accepts a variable argument.
+const varArgSDL = `
+schema
+  @link(url: "https://specs.apollo.dev/link/v1.0")
+  @link(url: "https://specs.apollo.dev/join/v0.3", for: EXECUTION)
+{
+  query: Query
+}
+
+directive @join__field(graph: join__Graph, requires: join__FieldSet, provides: join__FieldSet, external: Boolean) repeatable on FIELD_DEFINITION | INPUT_FIELD_DEFINITION
+directive @join__graph(name: String!, url: String!) on ENUM_VALUE
+directive @join__type(graph: join__Graph!, key: join__FieldSet, extension: Boolean! = false) repeatable on OBJECT | INTERFACE
+directive @link(url: String, for: String) repeatable on SCHEMA
+
+scalar join__FieldSet
+
+enum join__Graph {
+  ACCOUNTS @join__graph(name: "accounts", url: "ACCOUNTS_URL")
+  REVIEWS  @join__graph(name: "reviews",  url: "REVIEWS_URL")
+}
+
+type Query
+  @join__type(graph: ACCOUNTS)
+{
+  me: User @join__field(graph: ACCOUNTS)
+}
+
+type User
+  @join__type(graph: ACCOUNTS, key: "id")
+  @join__type(graph: REVIEWS,  key: "id")
+{
+  id:                       ID!      @join__field(graph: ACCOUNTS)
+  name:                     String   @join__field(graph: ACCOUNTS)
+  filteredReviews(region: String): [Review] @join__field(graph: REVIEWS)
+}
+
+type Review @join__type(graph: REVIEWS, key: "id") {
+  id:   ID!
+  body: String
+}
+`
+
+func TestBuildPlan_EntityFetchWithVars(t *testing.T) {
+	sg, err := federation.ParseSchema(varArgSDL)
+	if err != nil {
+		t.Fatalf("ParseSchema: %v", err)
+	}
+	plan, err := federation.BuildPlan(sg,
+		`query GetUser($region: String) { me { id name filteredReviews(region: $region) { id body } } }`, "")
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if len(plan.EntityFetches) != 1 {
+		t.Fatalf("len(EntityFetches) = %d, want 1", len(plan.EntityFetches))
+	}
+	ef := plan.EntityFetches[0]
+	if !strings.Contains(ef.Query, "$representations: [_Any!]!, $region: String") {
+		t.Errorf("Query should declare $region: Query = %q", ef.Query)
+	}
+	if len(ef.Variables) != 1 || ef.Variables[0] != "region" {
+		t.Errorf("Variables = %v, want [region]", ef.Variables)
+	}
+	if !strings.Contains(ef.Query, "filteredReviews(region: $region)") {
+		t.Errorf("Query should contain field with argument: %q", ef.Query)
+	}
+}
+
+func TestPlanSpecRoundTrip_WithEntityFetchVars(t *testing.T) {
+	sg, err := federation.ParseSchema(varArgSDL)
+	if err != nil {
+		t.Fatalf("ParseSchema: %v", err)
+	}
+	spec, err := federation.BuildPlanSpec(sg,
+		`query GetUser($region: String) { me { id name filteredReviews(region: $region) { id body } } }`, "")
+	if err != nil {
+		t.Fatalf("BuildPlanSpec: %v", err)
+	}
+	if len(spec.EntityFetches) == 0 {
+		t.Fatal("expected entity fetches in spec")
+	}
+	origQuery := spec.EntityFetches[0].Query
+	origVars := spec.EntityFetches[0].Variables
+	if origQuery == "" {
+		t.Fatal("entity fetch Query should be non-empty before round-trip")
+	}
+
+	b, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded federation.PlanSpec
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	plan, err := decoded.Resolve(sg)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	ef := plan.EntityFetches[0]
+	if ef.Query != origQuery {
+		t.Errorf("Query not preserved: got %q, want %q", ef.Query, origQuery)
+	}
+	if len(ef.Variables) != len(origVars) {
+		t.Errorf("Variables not preserved: got %v, want %v", ef.Variables, origVars)
+	} else {
+		for i, v := range origVars {
+			if ef.Variables[i] != v {
+				t.Errorf("Variables[%d]: got %q, want %q", i, ef.Variables[i], v)
+			}
+		}
+	}
 }
 
 func TestBuildPlan_WithVariables(t *testing.T) {
@@ -228,6 +347,39 @@ func TestBuildPlan_WithVariables(t *testing.T) {
 	query := plan.Fetches[0].Query
 	if strings.Contains(query, "$first") {
 		t.Logf("query: %s", query)
+	}
+}
+
+const mutationSDL = minimalSDL + `
+type Mutation
+  @join__type(graph: ACCOUNTS)
+  @join__type(graph: REVIEWS)
+{
+  createReview(body: String!): Review @join__field(graph: REVIEWS)
+  updateUser(id: ID!, name: String!): User @join__field(graph: ACCOUNTS)
+}
+`
+
+func TestBuildPlan_Mutation(t *testing.T) {
+	sg, err := federation.ParseSchema(mutationSDL)
+	if err != nil {
+		t.Fatalf("ParseSchema: %v", err)
+	}
+	plan, err := federation.BuildPlan(sg, `mutation CreateReview($body: String!) { createReview(body: $body) { id body } }`, "")
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if len(plan.Fetches) != 1 {
+		t.Fatalf("len(Fetches) = %d, want 1", len(plan.Fetches))
+	}
+	if plan.Fetches[0].Subgraph.EnumName != "REVIEWS" {
+		t.Errorf("fetch subgraph = %q, want REVIEWS", plan.Fetches[0].Subgraph.EnumName)
+	}
+	if !strings.Contains(plan.Fetches[0].Query, "mutation") {
+		t.Errorf("plan query should be a mutation: %s", plan.Fetches[0].Query)
+	}
+	if !strings.Contains(plan.Fetches[0].Query, "createReview") {
+		t.Errorf("plan query missing createReview: %s", plan.Fetches[0].Query)
 	}
 }
 
@@ -502,5 +654,81 @@ func TestSubgraphURLs_InvalidSDL(t *testing.T) {
 	_, err := federation.SubgraphURLs("not valid graphql {{{{")
 	if err == nil {
 		t.Error("expected error for invalid SDL")
+	}
+}
+
+// inlineFragSDL has a union type AdminAggregate so we can test that
+// "... on District { id }" inline fragments survive the planner round-trip.
+const inlineFragSDL = `
+schema
+  @link(url: "https://specs.apollo.dev/link/v1.0")
+  @link(url: "https://specs.apollo.dev/join/v0.3", for: EXECUTION)
+{
+  query: Query
+}
+
+directive @join__field(graph: join__Graph, requires: join__FieldSet, provides: join__FieldSet, external: Boolean) repeatable on FIELD_DEFINITION | INPUT_FIELD_DEFINITION
+directive @join__graph(name: String!, url: String!) on ENUM_VALUE
+directive @join__type(graph: join__Graph!, key: join__FieldSet, extension: Boolean! = false) repeatable on OBJECT | INTERFACE
+directive @join__unionMember(graph: join__Graph!, member: String!) repeatable on UNION
+directive @link(url: String, for: String) repeatable on SCHEMA
+
+scalar join__FieldSet
+
+enum join__Graph {
+  DISTRICTS @join__graph(name: "districts", url: "DISTRICTS_URL")
+}
+
+type Query @join__type(graph: DISTRICTS) {
+  metaDistrict(id: ID!): MetaDistrict @join__field(graph: DISTRICTS)
+}
+
+type MetaDistrict @join__type(graph: DISTRICTS, key: "id") {
+  id:          ID!
+  descendants: [AdminAggregate!]! @join__field(graph: DISTRICTS)
+}
+
+union AdminAggregate
+  @join__unionMember(graph: DISTRICTS, member: "District")
+  @join__unionMember(graph: DISTRICTS, member: "MetaDistrict")
+  = District | MetaDistrict
+
+type District @join__type(graph: DISTRICTS, key: "id") {
+  id: ID!
+}
+`
+
+func TestBuildPlan_InlineFragment(t *testing.T) {
+	sg, err := federation.ParseSchema(inlineFragSDL)
+	if err != nil {
+		t.Fatalf("ParseSchema: %v", err)
+	}
+	plan, err := federation.BuildPlan(sg, `
+		query Q($id: ID!) {
+			metaDistrict(id: $id) {
+				id
+				descendants {
+					__typename
+					... on District {
+						id
+					}
+				}
+			}
+		}`, "Q")
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if len(plan.Fetches) != 1 {
+		t.Fatalf("want 1 fetch, got %d", len(plan.Fetches))
+	}
+	q := plan.Fetches[0].Query
+	if !strings.Contains(q, "... on District") {
+		t.Errorf("inline fragment missing from subgraph query:\n%s", q)
+	}
+	if !strings.Contains(q, "id") {
+		t.Errorf("id field inside inline fragment missing:\n%s", q)
+	}
+	if len(plan.EntityFetches) != 0 {
+		t.Errorf("want 0 entity fetches (single-subgraph query), got %d", len(plan.EntityFetches))
 	}
 }

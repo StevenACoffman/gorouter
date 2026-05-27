@@ -105,8 +105,8 @@ func Execute(
 			continue
 		}
 
-		entityQuery := buildEntityQuery(ef.TypeName, ef.Selection)
-		entityVars := map[string]interface{}{"representations": reps}
+		entityQuery := ef.entityQuery()
+		entityVars := buildEntityFetchVars(reps, variables, ef.Variables)
 
 		resp, err := doGraphQL(ctx, client, ef.Subgraph.URL, entityQuery, "", entityVars)
 		if err != nil {
@@ -176,21 +176,49 @@ func doGraphQL(
 // buildEntityQuery constructs the _entities query for entity resolution.
 // selection is the body to fetch, e.g. "reviews {\n  title\n}\n"
 func buildEntityQuery(typeName, selection string) string {
-	// Indent the selection body under "... on TypeName".
+	return buildEntityQueryFull(typeName, selection, "")
+}
+
+// buildEntityQueryFull builds a complete _entities query with optional extra
+// variable declarations. extraVarDecls is pre-formatted as ", $region: String"
+// (leading comma and space included); pass "" when there are no extra vars.
+func buildEntityQueryFull(typeName, selection, extraVarDecls string) string {
 	lines := strings.Split(strings.TrimRight(selection, "\n"), "\n")
 	indented := make([]string, 0, len(lines))
 	for _, l := range lines {
 		indented = append(indented, "      "+l)
 	}
 	return fmt.Sprintf(
-		"query($representations: [_Any!]!) {\n  _entities(representations: $representations) {\n    ... on %s {\n%s\n    }\n  }\n}",
+		"query($representations: [_Any!]!%s) {\n  _entities(representations: $representations) {\n    ... on %s {\n%s\n    }\n  }\n}",
+		extraVarDecls,
 		typeName,
 		strings.Join(indented, "\n"),
 	)
 }
 
+// buildEntityFetchVars merges entity representations with any operation variables
+// the entity fetch selection references. opVars must be map[string]interface{};
+// struct-typed opVars cannot be subset-extracted.
+func buildEntityFetchVars(reps interface{}, opVars interface{}, varNames []string) map[string]interface{} {
+	m := map[string]interface{}{"representations": reps}
+	if len(varNames) == 0 {
+		return m
+	}
+	opMap, ok := opVars.(map[string]interface{})
+	if !ok {
+		return m
+	}
+	for _, name := range varNames {
+		if v, ok := opMap[name]; ok {
+			m[name] = v
+		}
+	}
+	return m
+}
+
 // collectRepresentations extracts entity representations from merged data at path.
-// Each representation is {"__typename": typeName, keyField: value, ...}.
+// Arrays at any step are fanned out — all leaves across nested arrays are collected
+// in traversal order, one representation per leaf.
 func collectRepresentations(
 	data map[string]interface{},
 	path []string,
@@ -198,40 +226,56 @@ func collectRepresentations(
 	keyFields []string,
 	isList bool,
 ) ([]map[string]interface{}, error) {
-	target := walkPath(data, path)
-	if target == nil {
+	if len(path) == 0 {
 		return nil, nil
 	}
-
-	if isList {
-		list, ok := target.([]interface{})
-		if !ok {
-			return nil, fmt.Errorf("expected list at path %v, got %T", path, target)
-		}
-		reps := make([]map[string]interface{}, 0, len(list))
-		for _, item := range list {
-			itemMap, ok := item.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			rep, err := buildRepresentation(itemMap, typeName, keyFields)
-			if err != nil {
-				return nil, err
-			}
-			reps = append(reps, rep)
-		}
-		return reps, nil
-	}
-
-	itemMap, ok := target.(map[string]interface{})
+	v, ok := data[path[0]]
 	if !ok {
-		return nil, fmt.Errorf("expected object at path %v, got %T", path, target)
+		return nil, nil
 	}
-	rep, err := buildRepresentation(itemMap, typeName, keyFields)
-	if err != nil {
-		return nil, err
+	leaves := collectLeaves(v, path[1:], isList)
+	reps := make([]map[string]interface{}, 0, len(leaves))
+	for _, leaf := range leaves {
+		itemMap, ok := leaf.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		rep, err := buildRepresentation(itemMap, typeName, keyFields)
+		if err != nil {
+			return nil, err
+		}
+		reps = append(reps, rep)
 	}
-	return []map[string]interface{}{rep}, nil
+	return reps, nil
+}
+
+// collectLeaves traverses v following path, fanning out through any slices encountered
+// at intermediate steps. Returns the leaf values in traversal order.
+// When isList is true the terminal value is itself unwrapped as a slice.
+func collectLeaves(v interface{}, path []string, isList bool) []interface{} {
+	if len(path) == 0 {
+		if isList {
+			if list, ok := v.([]interface{}); ok {
+				return list
+			}
+			return nil
+		}
+		if v != nil {
+			return []interface{}{v}
+		}
+		return nil
+	}
+	switch node := v.(type) {
+	case map[string]interface{}:
+		return collectLeaves(node[path[0]], path[1:], isList)
+	case []interface{}:
+		var results []interface{}
+		for _, elem := range node {
+			results = append(results, collectLeaves(elem, path, isList)...)
+		}
+		return results
+	}
+	return nil
 }
 
 func buildRepresentation(obj map[string]interface{}, typeName string, keyFields []string) (map[string]interface{}, error) {
@@ -246,10 +290,12 @@ func buildRepresentation(obj map[string]interface{}, typeName string, keyFields 
 	return rep, nil
 }
 
-// mergeEntityResults merges _entities response data back into the merged result map.
-func mergeEntityResults(data map[string]interface{}, path []string, entities []interface{}, isList bool) {
+// mergeEntityResults merges _entities response data back into the merged result map,
+// consuming entities in traversal order (the same order collectRepresentations produced them).
+// Returns the unconsumed tail of entities.
+func mergeEntityResults(data map[string]interface{}, path []string, entities []interface{}, isList bool) []interface{} {
 	if len(path) == 0 || len(entities) == 0 {
-		return
+		return entities
 	}
 
 	if len(path) == 1 {
@@ -257,72 +303,52 @@ func mergeEntityResults(data map[string]interface{}, path []string, entities []i
 		if isList {
 			list, ok := target.([]interface{})
 			if !ok {
-				return
+				return entities
 			}
-			for i, item := range list {
-				if i >= len(entities) {
+			for _, item := range list {
+				if len(entities) == 0 {
 					break
 				}
 				itemMap, ok := item.(map[string]interface{})
 				if !ok {
 					continue
 				}
-				entityMap, ok := entities[i].(map[string]interface{})
-				if !ok {
-					continue
+				if entityMap, ok := entities[0].(map[string]interface{}); ok {
+					for k, v := range entityMap {
+						itemMap[k] = v
+					}
 				}
-				for k, v := range entityMap {
-					itemMap[k] = v
-				}
+				entities = entities[1:]
 			}
 		} else {
 			targetMap, ok := target.(map[string]interface{})
-			if !ok || len(entities) == 0 {
-				return
-			}
-			entityMap, ok := entities[0].(map[string]interface{})
 			if !ok {
-				return
+				return entities
 			}
-			for k, v := range entityMap {
-				targetMap[k] = v
+			if entityMap, ok := entities[0].(map[string]interface{}); ok {
+				for k, v := range entityMap {
+					targetMap[k] = v
+				}
 			}
+			entities = entities[1:]
 		}
-		return
+		return entities
 	}
 
-	// Recurse into nested path.
+	// Recurse into nested path. Arrays are transparent: fan through each element
+	// and consume entities in order.
 	next := data[path[0]]
 	switch v := next.(type) {
 	case map[string]interface{}:
-		mergeEntityResults(v, path[1:], entities, isList)
+		entities = mergeEntityResults(v, path[1:], entities, isList)
 	case []interface{}:
 		for _, item := range v {
 			if itemMap, ok := item.(map[string]interface{}); ok {
-				mergeEntityResults(itemMap, path[1:], entities, isList)
+				entities = mergeEntityResults(itemMap, path[1:], entities, isList)
 			}
 		}
 	}
-}
-
-// walkPath traverses data following the given path and returns the value.
-func walkPath(data map[string]interface{}, path []string) interface{} {
-	if len(path) == 0 {
-		return data
-	}
-	v, ok := data[path[0]]
-	if !ok {
-		return nil
-	}
-	if len(path) == 1 {
-		return v
-	}
-	switch next := v.(type) {
-	case map[string]interface{}:
-		return walkPath(next, path[1:])
-	default:
-		return nil
-	}
+	return entities
 }
 
 // filterVars returns only the variables whose names are in keep.

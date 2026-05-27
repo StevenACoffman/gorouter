@@ -32,9 +32,21 @@ type EntityFetchSpec struct {
 	TypeName       string   // entity type, e.g. "User"
 	KeyFields      []string // key field names, e.g. ["id"]
 	RequiresFields []string // @requires fields to embed in representations beyond key fields
-	Selection      string   // the fields to fetch: "reviews {\n  title\n}\n"
+	Selection      string   // the selection body: "reviews {\n  title\n}\n" (kept for backward compat)
+	Query          string   // full entity query with variable declarations; supersedes Selection when non-empty
+	Variables      []string // operation variable names to forward beyond "representations"
 	ParentPath     []string // JSON path to the parent in the merged data, e.g. ["user"]
 	IsParentList   bool     // true when ParentPath resolves to a list
+}
+
+// entityQuery returns the complete _entities query string. When Query is set
+// (built at plan time with correct variable declarations), it is used directly.
+// Falls back to buildEntityQuery for old plan specs that only carry Selection.
+func (ef *EntityFetchSpec) entityQuery() string {
+	if ef.Query != "" {
+		return ef.Query
+	}
+	return buildEntityQuery(ef.TypeName, ef.Selection)
 }
 
 // FieldProjection is a node in the user-requested selection tree.
@@ -45,12 +57,14 @@ type FieldProjection struct {
 }
 
 // node is an intermediate representation of a field for query building.
+// Inline fragment nodes have typeCondition set and name/alias/args empty.
 type node struct {
-	alias    string
-	name     string
-	args     string   // pre-formatted argument string
-	children []*node
-	forced   bool // added by the planner for key/requires resolution, not in the original query
+	alias         string
+	name          string
+	typeCondition string // non-empty for "... on Type" inline fragments
+	args          string // pre-formatted argument string
+	children      []*node
+	forced        bool // added by the planner for key/requires resolution, not in the original query
 }
 
 // BuildPlan analyzes a GraphQL query against the supergraph routing table
@@ -73,6 +87,8 @@ func BuildPlan(sg *Supergraph, queryStr, operationName string) (*Plan, error) {
 		Projection: buildProjection(op.SelectionSet),
 	}
 
+	rootTypeName := rootType(op.Operation)
+
 	// Group root selections by their owning subgraph.
 	type group struct {
 		sg       *Subgraph
@@ -87,7 +103,7 @@ func BuildPlan(sg *Supergraph, queryStr, operationName string) (*Plan, error) {
 		if !ok {
 			continue
 		}
-		ownerEnum := sg.OwnerOf("Query", field.Name)
+		ownerEnum := sg.OwnerOf(rootTypeName, field.Name)
 		if ownerEnum == "" {
 			return nil, fmt.Errorf("federation: field %q has no subgraph owner in routing table", field.Name)
 		}
@@ -102,13 +118,13 @@ func BuildPlan(sg *Supergraph, queryStr, operationName string) (*Plan, error) {
 		g := groups[ownerEnum]
 
 		n := buildNode(field)
-		returnType := sg.FieldTypeName("Query", field.Name)
-		returnIsList := sg.FieldIsList("Query", field.Name)
+		returnType := sg.FieldTypeName(rootTypeName, field.Name)
+		returnIsList := sg.FieldIsList(rootTypeName, field.Name)
 		rootPath := []string{effectiveName(field)}
 
-		// Provides from a Query-level field (uncommon, but check anyway).
-		rootProvides := parseProvidesSet(sg.FieldProvides("Query", field.Name))
-		entityFetches := splitCrossSubgraph(sg, n, returnType, ownerEnum, rootPath, returnIsList, rootProvides)
+		// Provides from a root-level field (uncommon, but check anyway).
+		rootProvides := parseProvidesSet(sg.FieldProvides(rootTypeName, field.Name))
+		entityFetches := splitCrossSubgraph(sg, n, returnType, ownerEnum, rootPath, returnIsList, rootProvides, op.VariableDefinitions)
 		plan.EntityFetches = append(plan.EntityFetches, entityFetches...)
 
 		g.nodes = append(g.nodes, n)
@@ -171,6 +187,7 @@ func splitCrossSubgraph(
 	path []string,
 	pathIsList bool,
 	providedLocally map[string]bool,
+	varDefs ast.VariableDefinitionList,
 ) []*EntityFetchSpec {
 	if typeName == "" || len(n.children) == 0 {
 		return nil
@@ -186,6 +203,13 @@ func splitCrossSubgraph(
 	var crossOrder []string
 
 	for _, child := range n.children {
+		// Inline fragment nodes (... on Type { }) belong to their parent field's
+		// subgraph. Pass through unchanged without routing analysis.
+		if child.typeCondition != "" {
+			keep = append(keep, child)
+			continue
+		}
+
 		// __typename is available everywhere; keep if user requested it.
 		if child.name == "__typename" {
 			keep = append(keep, child)
@@ -231,12 +255,16 @@ func splitCrossSubgraph(
 			}
 
 			// Build entity fetch for this @requires field itself.
+			requiresSel := renderNode(child, "")
+			requiresEFQ, requiresEFVars := entityFetchQueryAndVars([]*node{child}, typeName, requiresSel, varDefs)
 			requiresEntityFetches = append(requiresEntityFetches, &EntityFetchSpec{
 				Subgraph:       sg.SubgraphByEnum(currentEnum),
 				TypeName:       typeName,
 				KeyFields:      sg.KeysFor(typeName, currentEnum),
 				RequiresFields: topLevelRequiresFields,
-				Selection:      renderNode(child, ""),
+				Selection:      requiresSel,
+				Query:          requiresEFQ,
+				Variables:      requiresEFVars,
 				ParentPath:     path,
 				IsParentList:   pathIsList,
 			})
@@ -250,7 +278,7 @@ func splitCrossSubgraph(
 			childPath := append(append([]string{}, path...), effectiveNodeName(child))
 			// Pass @provides of this child field to the recursive call.
 			childProvides := parseProvidesSet(sg.FieldProvides(typeName, child.name))
-			subFetches := splitCrossSubgraph(sg, child, childType, currentEnum, childPath, childIsList, childProvides)
+			subFetches := splitCrossSubgraph(sg, child, childType, currentEnum, childPath, childIsList, childProvides, varDefs)
 			entityFetches = append(entityFetches, subFetches...)
 			keep = append(keep, child)
 		} else {
@@ -294,12 +322,16 @@ func splitCrossSubgraph(
 		for _, child := range cg.nodes {
 			selParts = append(selParts, renderNode(child, ""))
 		}
+		sel := strings.Join(selParts, "")
+		efq, efVars := entityFetchQueryAndVars(cg.nodes, typeName, sel, varDefs)
 		entityFetches = append(entityFetches, &EntityFetchSpec{
 			Subgraph:       cg.sub,
 			TypeName:       typeName,
 			KeyFields:      cg.keyFields,
 			RequiresFields: cg.requiresFields,
-			Selection:      strings.Join(selParts, ""),
+			Selection:      sel,
+			Query:          efq,
+			Variables:      efVars,
 			ParentPath:     path,
 			IsParentList:   pathIsList,
 		})
@@ -485,10 +517,13 @@ func parseFieldSetTokens(tokens []string, pos int) ([]*node, int) {
 // --- helpers ---
 
 // existingNodeNames builds a lookup map from a node slice's field names.
+// Inline fragment nodes (typeCondition != "") are skipped — they have no field name.
 func existingNodeNames(nodes []*node) map[string]bool {
 	m := make(map[string]bool, len(nodes))
 	for _, n := range nodes {
-		m[n.name] = true
+		if n.typeCondition == "" {
+			m[n.name] = true
+		}
 	}
 	return m
 }
@@ -520,6 +555,16 @@ func buildNode(f *ast.Field) *node {
 						n.children = append(n.children, buildNode(ff))
 					}
 				}
+			} else {
+				frag := &node{typeCondition: v.TypeCondition}
+				for _, isel := range v.SelectionSet {
+					if ff, ok := isel.(*ast.Field); ok {
+						frag.children = append(frag.children, buildNode(ff))
+					}
+				}
+				if len(frag.children) > 0 {
+					n.children = append(n.children, frag)
+				}
 			}
 		}
 	}
@@ -528,6 +573,15 @@ func buildNode(f *ast.Field) *node {
 
 // renderNode prints a node tree as a GraphQL selection fragment.
 func renderNode(n *node, indent string) string {
+	if n.typeCondition != "" {
+		var sb strings.Builder
+		sb.WriteString(indent + "... on " + n.typeCondition + " {\n")
+		for _, child := range n.children {
+			sb.WriteString(renderNode(child, indent+"  "))
+		}
+		sb.WriteString(indent + "}\n")
+		return sb.String()
+	}
 	var sb strings.Builder
 	sb.WriteString(indent)
 	if n.alias != "" && n.alias != n.name {
@@ -601,6 +655,26 @@ func buildVarDecls(defs ast.VariableDefinitionList, used map[string]bool) string
 	return "(" + strings.Join(parts, ", ") + ")"
 }
 
+// entityFetchQueryAndVars builds the complete _entities query string and the list of
+// operation variable names that the entity fetch selection references. The query
+// includes any variable declarations beyond $representations so the subgraph accepts
+// them; varNames lists the names to forward from the operation variables at runtime.
+func entityFetchQueryAndVars(nodes []*node, typeName, selection string, varDefs ast.VariableDefinitionList) (string, []string) {
+	used := make(map[string]bool)
+	for _, n := range nodes {
+		collectVarNames(n, used)
+	}
+	var extraParts []string
+	var varNames []string
+	for _, vd := range varDefs {
+		if used[vd.Variable] {
+			extraParts = append(extraParts, ", $"+vd.Variable+": "+vd.Type.String())
+			varNames = append(varNames, vd.Variable)
+		}
+	}
+	return buildEntityQueryFull(typeName, selection, strings.Join(extraParts, "")), varNames
+}
+
 // collectVarNames adds variable names referenced in n's argument tree to used.
 func collectVarNames(n *node, used map[string]bool) {
 	s := n.args
@@ -656,5 +730,16 @@ func operationKind(op ast.Operation) string {
 		return "subscription"
 	default:
 		return "query"
+	}
+}
+
+func rootType(op ast.Operation) string {
+	switch op {
+	case ast.Mutation:
+		return "Mutation"
+	case ast.Subscription:
+		return "Subscription"
+	default:
+		return "Query"
 	}
 }

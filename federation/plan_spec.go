@@ -28,6 +28,8 @@ type EntityFetchSpecData struct {
 	KeyFields      []string `json:"keyFields"`
 	RequiresFields []string `json:"requiresFields,omitempty"`
 	Selection      string   `json:"selection"`
+	Query          string   `json:"query,omitempty"`
+	Variables      []string `json:"variables,omitempty"`
 	ParentPath     []string `json:"parentPath"`
 	IsParentList   bool     `json:"isParentList,omitempty"`
 }
@@ -62,6 +64,8 @@ func PlanToSpec(plan *Plan) *PlanSpec {
 			KeyFields:      ef.KeyFields,
 			RequiresFields: ef.RequiresFields,
 			Selection:      ef.Selection,
+			Query:          ef.Query,
+			Variables:      ef.Variables,
 			ParentPath:     ef.ParentPath,
 			IsParentList:   ef.IsParentList,
 		})
@@ -99,6 +103,8 @@ func (s *PlanSpec) Resolve(sg *Supergraph) (*Plan, error) {
 			KeyFields:      ef.KeyFields,
 			RequiresFields: ef.RequiresFields,
 			Selection:      ef.Selection,
+			Query:          ef.Query,
+			Variables:      ef.Variables,
 			ParentPath:     ef.ParentPath,
 			IsParentList:   ef.IsParentList,
 		})
